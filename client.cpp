@@ -15,11 +15,14 @@
 
 using namespace std;
 
+vector<string>msglist;
 struct clientArgs
 {
     int flag;
-    int clientSocket;
-    struct sockaddr_in clientSockAddr;
+    int mySock;
+    struct sockaddr_in saddr;
+    socklen_t saddrlen;
+    pthread_mutex_t mx;
 };
 void sig_handler(int fd)
 {
@@ -28,63 +31,43 @@ void sig_handler(int fd)
 }
 
 void* SendRequest(void* arg){
-    clientArgs* args=(clientArgs*) arg;
+   clientArgs* args=(clientArgs*) arg;
     int* flag=&args->flag;
-    int clientSocket=args->clientSocket;
+    int mySock=args->mySock;
+    pthread_mutex_t mx=args->mx;
+    struct sockaddr_in saddr=args->saddr;
+    socklen_t saddrlen=args->saddrlen;
     int count=0;
     char sndbuf[256];
     while(*flag==0){
-        memset(sndbuf, 0, 256);
-        int len= sprintf(sndbuf,"request %d\n", count);
-        ssize_t sentcount=send(clientSocket, sndbuf, len, 0);
-        if (sentcount==-1){
+        int len = sprintf(sndbuf,"request %d",count);
+        sleep(1);
+        int sentcount = sendto(mySock,sndbuf,len,0,(struct sockaddr*)&saddr,saddrlen);
+        if (sentcount == -1) {
             perror("send error");
         }else{
-            printf("sended to server: %s\n", sndbuf);
+            printf("client send to server: %s\n", sndbuf);
         }
         count++;
-        sleep(1);
     }
     pthread_exit(nullptr);
 }
 void* GetAnswer(void* arg){
     clientArgs* args=(clientArgs*) arg;
     int* flag=&args->flag;
-    int clientSocket=args->clientSocket;
+    int mySock=args->mySock;
+    pthread_mutex_t mx=args->mx;
+    struct sockaddr_in saddr=args->saddr;
+    socklen_t saddrlen=args->saddrlen;
+    char rcvbuf[256];
     while (*flag==0){
-        char rcvbuf[256];
-        ssize_t reccount=recv(clientSocket, rcvbuf, 256, 0);
-        if (reccount==-1){
+        memset(rcvbuf,0,sizeof(rcvbuf));
+        int recvcount = recvfrom(mySock,rcvbuf,sizeof(rcvbuf),0,(struct sockaddr*)&saddr,&saddrlen);
+        if (recvcount == -1) {
             perror("recv error");
-            sleep(1);
-        }else if (reccount==0){
-            printf("disconnection\n");
             sleep(1);
         }else{
             printf("client got from server: %s\n", rcvbuf);
-        }
-    }
-    pthread_exit(nullptr);
-}
-void* Connect(void* arg){
-    printf("connect func started\n");
-    clientArgs* args=(clientArgs*) arg;
-    int* flag=&args->flag;
-    int clientSocket=args->clientSocket;
-    struct sockaddr_in clientSockAddr =args->clientSockAddr;
-    while (*flag==0){
-        int result= connect(clientSocket, (struct sockaddr*)&clientSockAddr, sizeof(clientSockAddr));
-        if (result==-1){
-            perror("connect error");
-            sleep(1);
-        }else{
-            printf("connection established\n");
-            pthread_t sendR, getAn;
-            pthread_create(&sendR, nullptr, SendRequest, arg);
-            pthread_create(&getAn, nullptr, GetAnswer, arg);
-
-            int res_send = pthread_join(sendR, nullptr);
-            int res_get = pthread_join(getAn, nullptr);
         }
     }
     pthread_exit(nullptr);
@@ -94,22 +77,34 @@ int main(){
     printf("client started\n");
 
     signal(SIGPIPE, sig_handler);
-    pthread_t con;
     clientArgs args;
+    pthread_t sendReq, getAns;
+    args.mySock=socket(AF_INET,SOCK_DGRAM,0);
+
+    fcntl(args.mySock, F_SETFL, O_NONBLOCK);
 
     args.flag=0;
-    args.clientSocket=socket(AF_INET, SOCK_STREAM,0);
-    fcntl(args.clientSocket,F_SETFL,O_NONBLOCK);
-    args.clientSockAddr.sin_family=AF_INET;
-    args.clientSockAddr.sin_port= htons(7000);
-    args.clientSockAddr.sin_addr.s_addr= inet_addr("127.0.0.1");
-    pthread_create(&con, nullptr, Connect, (void*)&args);
+    struct sockaddr_in bindaddr;
+    bindaddr.sin_family = AF_INET;
+    bindaddr.sin_port = htons(7000);
+    bindaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind(args.mySock,(struct sockaddr*)&bindaddr,sizeof(bindaddr));
+
+    memset(&args.saddr, 0, sizeof(args.saddr));
+    args.saddr.sin_family = AF_INET;
+    args.saddr.sin_port = htons(8000);
+    args.saddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    args.saddrlen = sizeof(args.saddr);
+
+    pthread_mutex_init(&args.mx, nullptr);
+    pthread_create(&sendReq, nullptr, SendRequest, (void*)&args);
+    pthread_create(&getAns, nullptr, GetAnswer, (void*)&args);
     printf("waiting for key press\n");
     args.flag=getchar();
     printf("key was pressed\n");
-    pthread_join(con, nullptr);
-    shutdown(args.clientSocket, 2);
-    close(args.clientSocket);
+    pthread_join(sendReq, nullptr);
+    pthread_join(getAns, nullptr);
+    close(args.mySock);
     printf("client finished\n");
     return 0;
 }
